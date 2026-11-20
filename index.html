@@ -1,0 +1,2157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <title>Auto PDF Signature Validator</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Inter Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- @cantoo/pdf-lib: Native decryption for password-protected PDFs (e-Aadhaar, e-PAN, AES-256/128, RC4) in 100% Pure Vector Mode -->
+  <script src="https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <!-- pako: Reliable FlateDecode stream inflation for exact PDF Layer Surgery -->
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+
+  <!-- PDF.js v3.11.174 for crisp high-DPR canvas preview -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: #f8fafc;
+      color: #0f172a;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Subtle dot grid for preview stage */
+    .preview-stage {
+      background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+      background-size: 16px 16px;
+    }
+
+    /* Independently draggable Green Tick overlay */
+    #tickOverlay {
+      position: absolute;
+      box-sizing: border-box;
+      cursor: grab;
+      user-select: none;
+      touch-action: none; /* Prevents mobile page scroll while dragging tick */
+      border-radius: 6px;
+      z-index: 20;
+      transition: box-shadow 0.12s ease;
+    }
+
+    #tickOverlay:hover {
+      outline: 2px dashed rgba(22, 163, 74, 0.85);
+      outline-offset: 2px;
+    }
+
+    #tickOverlay.dragging {
+      cursor: grabbing;
+      outline: 2px solid #16a34a;
+      outline-offset: 2px;
+      box-shadow: 0 8px 22px rgba(22, 163, 74, 0.28);
+    }
+
+    /* Multiply blend lets black vector text on the canvas sit cleanly ON TOP of the green tick (exact Adobe Reader look) */
+    #tickOverlay.layer-behind {
+      mix-blend-mode: multiply;
+    }
+
+    #tickOverlay.layer-top {
+      mix-blend-mode: normal;
+    }
+
+    /* Optional manual stamp preview (only used if a scanned PDF has no /Sig annotation) */
+    #manualStampOverlay {
+      position: absolute;
+      box-sizing: border-box;
+      pointer-events: none;
+      z-index: 15;
+      display: none;
+      font-family: Helvetica, Arial, sans-serif;
+      color: #000000;
+      line-height: 1.2;
+      white-space: pre-wrap;
+      overflow: visible;
+    }
+
+    input[type="range"] {
+      accent-color: #16a34a;
+      height: 6px;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+
+    @keyframes toastIn {
+      from {
+        opacity: 0;
+        transform: translate(-50%, 14px);
+      }
+      to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+    }
+    .toast-animate {
+      animation: toastIn 0.22s ease-out forwards;
+    }
+
+    @keyframes modalIn {
+      from {
+        opacity: 0;
+        transform: scale(0.96) translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+      }
+    }
+    .modal-animate {
+      animation: modalIn 0.18s ease-out forwards;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Sticky Top Bar -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+    <div class="max-w-5xl mx-auto px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2">
+      <!-- Brand + Vector Mode Badge -->
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-sm shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.6" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h1 class="text-sm sm:text-base font-bold text-slate-900 truncate leading-tight">
+              Auto PDF Signature Validator
+            </h1>
+            <span id="headerModeBadge" class="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 whitespace-nowrap">
+              100% Vector Mode
+            </span>
+          </div>
+          <p class="text-[11px] text-slate-500 truncate hidden sm:block">
+            Pure Vector Layer Surgery for e-Aadhaar, e-PAN, WB e-District &amp; e-Ration Card
+          </p>
+        </div>
+      </div>
+
+      <!-- Top Actions -->
+      <div class="flex items-center gap-2 shrink-0">
+        <button
+          id="topUploadBtn"
+          type="button"
+          class="px-3.5 py-2 text-xs sm:text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 rounded-xl transition cursor-pointer inline-flex items-center gap-1.5"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+          </svg>
+          <span>Upload PDF</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-6">
+    <!-- Hidden File Input -->
+    <input type="file" id="pdfFileInput" accept="application/pdf,.pdf" class="hidden" />
+
+    <!-- Initial Upload Zone -->
+    <section id="uploadSection" class="max-w-xl mx-auto my-6 sm:my-14">
+      <div
+        id="dropZone"
+        class="bg-white border-2 border-dashed border-emerald-400 hover:border-emerald-600 rounded-3xl p-7 sm:p-12 text-center shadow-sm transition cursor-pointer"
+      >
+        <div class="w-16 h-16 mx-auto mb-5 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+          <svg class="w-9 h-9" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m6.75 12l-3-3m0 0l-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </div>
+
+        <h2 class="text-xl font-bold text-slate-900 mb-2">
+          Upload Digitally Signed PDF
+        </h2>
+        <p class="text-sm text-slate-500 mb-6 max-w-md mx-auto leading-relaxed">
+          Works in <strong class="text-slate-700">100% Pure Vector Mode</strong> even for password-protected <strong class="text-slate-700">e-Aadhaar</strong> &amp; <strong class="text-slate-700">e-PAN</strong>, plus WB e-District BDO Certificates &amp; e-Ration Cards. Keeps every single original word, font, QR code, and watermark untouched.
+        </p>
+
+        <button
+          id="selectFileBtn"
+          type="button"
+          class="inline-flex items-center gap-2 px-6 py-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-semibold rounded-2xl shadow-md shadow-emerald-600/20 transition cursor-pointer"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+          <span>Tap to Select PDF</span>
+        </button>
+
+        <div class="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-slate-500">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+            Zero Blur (Pure Vector)
+          </span>
+          <span class="flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+            Original Signature Text Intact
+          </span>
+          <span class="flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            100% Client-Side
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Loading Spinner -->
+    <section id="loadingSection" class="hidden max-w-md mx-auto my-16 text-center">
+      <div class="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
+        <div class="w-12 h-12 mx-auto mb-4 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin"></div>
+        <h3 id="loadingTitle" class="text-base font-bold text-slate-800">Processing PDF...</h3>
+        <p id="loadingSub" class="text-xs text-slate-500 mt-1">Running pure-vector layer surgery on digital signature</p>
+      </div>
+    </section>
+
+    <!-- Workspace (Shown after PDF loads) -->
+    <section id="workspaceSection" class="hidden space-y-3.5">
+
+      <!-- Status Bar -->
+      <div class="bg-white rounded-2xl border border-slate-200 px-3.5 py-3 shadow-xs flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <div class="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span id="statusModeBadge" class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                100% Vector Mode
+              </span>
+            </div>
+            <p id="statusText" class="text-xs sm:text-sm font-bold text-slate-900 leading-snug mt-0.5">
+              Signature validated on Page 1
+            </p>
+            <p id="fileInfoText" class="text-[11px] text-slate-500 truncate">
+              document.pdf
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Interactive Preview Card -->
+      <div class="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+        <!-- Preview Toolbar -->
+        <div class="px-3 py-2.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50/70">
+          <!-- Before / After Toggle -->
+          <div class="inline-flex bg-slate-200/75 p-1 rounded-xl">
+            <button
+              id="modeValidatedBtn"
+              type="button"
+              class="px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-emerald-700 shadow-xs transition cursor-pointer"
+            >
+              After (Validated)
+            </button>
+            <button
+              id="modeOriginalBtn"
+              type="button"
+              class="px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition cursor-pointer"
+            >
+              Before (Original)
+            </button>
+          </div>
+
+          <!-- Zoom to Signature (3x) Toggle + Fine Zoom -->
+          <div class="flex items-center gap-1.5 ml-auto">
+            <button
+              id="zoomSigToggleBtn"
+              type="button"
+              class="px-3 py-1.5 text-xs font-semibold rounded-xl border border-emerald-600 bg-emerald-50 text-emerald-800 transition cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0zM11 8v6M8 11h6" />
+              </svg>
+              <span>Zoom to Signature (3x)</span>
+            </button>
+
+            <div class="inline-flex items-center bg-slate-200/75 rounded-xl p-0.5">
+              <button
+                id="zoomOutBtn"
+                type="button"
+                title="Zoom Out"
+                class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white text-slate-700 font-bold text-sm transition cursor-pointer"
+              >−</button>
+              <span id="zoomLabel" class="text-[11px] font-mono font-semibold text-slate-700 px-1.5 min-w-[40px] text-center">100%</span>
+              <button
+                id="zoomInBtn"
+                type="button"
+                title="Zoom In"
+                class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white text-slate-700 font-bold text-sm transition cursor-pointer"
+              >+</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview Stage -->
+        <div class="preview-stage bg-slate-200/70 p-2.5 sm:p-4 flex flex-col items-center justify-center overflow-hidden">
+          <div class="text-[11px] font-medium text-slate-500 mb-2 flex items-center gap-1.5 text-center">
+            <svg class="w-3.5 h-3.5 text-emerald-600 shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
+            </svg>
+            <span>Drag ONLY the green tick directly on the preview, or fine-tune below</span>
+          </div>
+
+          <div id="canvasWrapper" class="relative inline-block bg-white shadow-xl rounded-sm max-w-full overflow-hidden">
+            <canvas id="pdfCanvas" class="block w-full h-auto"></canvas>
+
+            <!-- Optional Manual Stamp Overlay (only if enabled for scanned PDFs without /Sig) -->
+            <div id="manualStampOverlay"></div>
+
+            <!-- Independently Movable Adobe-Style Green Checkmark SVG -->
+            <div id="tickOverlay" class="layer-behind" title="Drag to move green tick">
+              <svg viewBox="0 0 100 100" class="w-full h-full block pointer-events-none" xmlns="http://www.w3.org/2000/svg">
+                <!-- Crisp black drop shadow -->
+                <path d="M 12 52 L 24 38 L 46 65 L 76 8 L 90 19 L 48 90 Z" fill="#000000" transform="translate(3.2, 3.2)" />
+                <!-- Adobe-style green (#009933) checkmark with crisp black outline -->
+                <path d="M 12 52 L 24 38 L 46 65 L 76 8 L 90 19 L 48 90 Z" fill="#009933" stroke="#000000" stroke-width="2.8" stroke-linejoin="miter" />
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Move & Resize Green Tick Control Panel -->
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-xs p-3.5 sm:p-4">
+        <div class="flex items-center justify-between gap-2 mb-3">
+          <div class="flex items-center gap-2">
+            <span class="w-6 h-6 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+              </svg>
+            </span>
+            <h3 class="text-sm font-bold text-slate-900">Move &amp; Resize Green Tick</h3>
+          </div>
+
+          <!-- Show / Hide Green Tick Toggle -->
+          <label class="inline-flex items-center gap-2 cursor-pointer select-none bg-slate-100 px-2.5 py-1.5 rounded-xl">
+            <input id="showTickToggle" type="checkbox" checked class="w-4 h-4 accent-emerald-600 rounded cursor-pointer" />
+            <span class="text-xs font-semibold text-slate-700">Show Tick</span>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Left: Tactile 4-Way D-Pad + Step Selector -->
+          <div class="flex flex-col sm:flex-row items-center gap-3.5 bg-slate-50 rounded-2xl p-3 border border-slate-200/80">
+            <!-- D-Pad -->
+            <div class="grid grid-cols-3 gap-1.5 w-36 shrink-0">
+              <div></div>
+              <button type="button" data-dir="up" class="dpad-btn h-11 rounded-xl bg-white hover:bg-emerald-50 active:bg-emerald-100 border border-slate-300 shadow-xs flex items-center justify-center text-slate-800 cursor-pointer" title="Move Up">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7" /></svg>
+              </button>
+              <div></div>
+
+              <button type="button" data-dir="left" class="dpad-btn h-11 rounded-xl bg-white hover:bg-emerald-50 active:bg-emerald-100 border border-slate-300 shadow-xs flex items-center justify-center text-slate-800 cursor-pointer" title="Move Left">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" /></svg>
+              </button>
+              <button type="button" id="centerTickBtn" class="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-[11px] font-bold flex items-center justify-center shadow-xs cursor-pointer" title="Center Tick">
+                Center
+              </button>
+              <button type="button" data-dir="right" class="dpad-btn h-11 rounded-xl bg-white hover:bg-emerald-50 active:bg-emerald-100 border border-slate-300 shadow-xs flex items-center justify-center text-slate-800 cursor-pointer" title="Move Right">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
+              </button>
+
+              <div></div>
+              <button type="button" data-dir="down" class="dpad-btn h-11 rounded-xl bg-white hover:bg-emerald-50 active:bg-emerald-100 border border-slate-300 shadow-xs flex items-center justify-center text-slate-800 cursor-pointer" title="Move Down">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </button>
+              <div></div>
+            </div>
+
+            <!-- Step Selector & Coordinates -->
+            <div class="flex-1 w-full space-y-2.5">
+              <div>
+                <span class="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Step Size</span>
+                <div class="grid grid-cols-3 gap-1.5">
+                  <button type="button" data-step="1" class="step-btn py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 cursor-pointer">Fine 1pt</button>
+                  <button type="button" data-step="4" class="step-btn py-1.5 text-xs font-semibold rounded-lg border border-emerald-600 bg-emerald-600 text-white cursor-pointer">Med 4pt</button>
+                  <button type="button" data-step="12" class="step-btn py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 cursor-pointer">Fast 12pt</button>
+                </div>
+              </div>
+
+              <div class="text-xs text-slate-500 bg-white px-3 py-2 rounded-xl border border-slate-200 flex items-center justify-between">
+                <span>Position</span>
+                <strong id="tickCoordText" class="font-mono text-slate-800">X: 0, Y: 0</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Tick Size (12pt - 120pt) & Layer Order Toggle -->
+          <div class="space-y-3 flex flex-col justify-between">
+            <div class="bg-slate-50 rounded-2xl p-3 border border-slate-200/80">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-bold text-slate-800">Tick Size</span>
+                <span id="tickSizeVal" class="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">48pt</span>
+              </div>
+              <div class="flex items-center gap-2.5">
+                <button id="sizeMinusBtn" type="button" class="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 font-bold text-lg text-slate-700 shrink-0 cursor-pointer">−</button>
+                <input id="tickSizeSlider" type="range" min="12" max="120" step="1" value="48" class="w-full" />
+                <button id="sizePlusBtn" type="button" class="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 font-bold text-lg text-slate-700 shrink-0 cursor-pointer">+</button>
+              </div>
+            </div>
+
+            <!-- Layer Order Toggle -->
+            <div class="grid grid-cols-2 gap-2">
+              <button
+                id="layerBehindBtn"
+                type="button"
+                class="py-2.5 px-3 text-xs font-semibold rounded-xl border border-emerald-600 bg-emerald-50 text-emerald-800 transition cursor-pointer"
+              >
+                Tick Behind Text (Adobe)
+              </button>
+              <button
+                id="layerTopBtn"
+                type="button"
+                class="py-2.5 px-3 text-xs font-semibold rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+              >
+                Tick On Top
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Collapsible Manual Adjustment Drawer (Collapsed by Default) -->
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <button
+          id="manualDrawerToggle"
+          type="button"
+          aria-expanded="false"
+          class="w-full px-4 py-3 flex items-center justify-between gap-2 text-left bg-slate-50/70 hover:bg-slate-100/80 transition cursor-pointer"
+        >
+          <div class="flex items-center gap-2">
+            <span class="w-6 h-6 rounded-lg bg-slate-200 text-slate-700 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </span>
+            <span class="text-sm font-bold text-slate-900">Manual Adjustment</span>
+            <span class="text-[11px] text-slate-400 font-normal hidden sm:inline">(Page selector, header visibility &amp; scanned-PDF stamp)</span>
+          </div>
+          <svg id="manualDrawerChevron" class="w-5 h-5 text-slate-400 transition-transform duration-200" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        <div id="manualDrawerBody" class="hidden p-4 border-t border-slate-200 space-y-4">
+          <!-- Page Selector (Multi-Page PDFs) -->
+          <div class="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <span class="block text-xs sm:text-sm font-bold text-slate-800">Target Page</span>
+              <span class="text-[11px] text-slate-500">Select which page to view &amp; place the green tick on</span>
+            </div>
+            <div class="inline-flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200">
+              <button id="prevPageBtn" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 disabled:opacity-40 flex items-center justify-center text-slate-700 cursor-pointer" title="Previous Page">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" /></svg>
+              </button>
+              <span id="pageLabel" class="text-xs font-mono font-bold text-slate-800 px-2">1 / 1</span>
+              <button id="nextPageBtn" type="button" class="w-8 h-8 rounded-lg hover:bg-slate-100 disabled:opacity-40 flex items-center justify-center text-slate-700 cursor-pointer" title="Next Page">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Header Toggle ("Signature valid") -->
+          <div class="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80 flex items-center justify-between gap-3">
+            <div>
+              <span class="block text-xs sm:text-sm font-bold text-slate-800">Keep "Signature valid" Header</span>
+              <span class="text-[11px] text-slate-500">Uncheck to force-hide the top "Signature valid" line from the original signature</span>
+            </div>
+            <input id="keepHeaderToggle" type="checkbox" checked class="w-5 h-5 accent-emerald-600 rounded cursor-pointer shrink-0" />
+          </div>
+
+          <!-- Manual Signature Stamp (Only for scanned PDFs with no /Sig annotation) -->
+          <div id="manualStampSection" class="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80 space-y-2.5">
+            <label class="flex items-center justify-between gap-2 cursor-pointer">
+              <div>
+                <span class="block text-xs sm:text-sm font-bold text-slate-800">Add Manual Signature Stamp Text</span>
+                <span class="text-[11px] text-slate-500">Only needed for scanned/flattened PDFs where no digital /Sig field exists</span>
+              </div>
+              <input id="manualStampToggle" type="checkbox" class="w-5 h-5 accent-emerald-600 rounded cursor-pointer shrink-0" />
+            </label>
+
+            <div id="manualStampFields" class="hidden pt-2 space-y-2">
+              <textarea
+                id="manualStampText"
+                rows="3"
+                placeholder="Signature valid&#10;Digitally Signed&#10;Date: YYYY-MM-DD"
+                class="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600"
+              >Signature valid&#10;Digitally Signed</textarea>
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs text-slate-600 font-medium">Stamp Font Size</span>
+                <input id="manualStampFontSize" type="range" min="6" max="16" step="1" value="9" class="w-40" />
+                <span id="manualStampFontVal" class="text-xs font-mono font-bold text-emerald-700 w-10 text-right">9pt</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prominent Full-Width Download CTA Button -->
+      <button
+        id="mainDownloadBtn"
+        type="button"
+        class="w-full py-4 px-6 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-55 disabled:cursor-not-allowed text-white font-bold text-sm sm:text-base rounded-2xl shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2.5 transition cursor-pointer"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+        </svg>
+        <span>Download Validated PDF</span>
+      </button>
+    </section>
+
+    <!-- 100% Client-Side Privacy Note -->
+    <footer class="mt-8 mb-4 text-center text-xs text-slate-500 space-y-1">
+      <p class="font-semibold text-slate-700">
+        100% Client-Side Privacy — Your PDF and password never leave your device.
+      </p>
+      <p class="text-[11px] text-slate-400 max-w-2xl mx-auto">
+        Zero backend servers. Pure-vector PDF Layer Surgery keeps all original fonts, QR codes, images, and watermarks razor-sharp.
+      </p>
+    </footer>
+  </main>
+
+  <!-- Password Protected PDF Modal -->
+  <div id="passwordModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="modal-animate bg-white w-full max-w-md rounded-3xl shadow-2xl border border-slate-200 p-6">
+      <div class="flex items-center gap-3 mb-3">
+        <div class="w-11 h-11 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <h2 class="text-lg font-bold text-slate-900">Password Protected PDF</h2>
+          <p id="pwFileName" class="text-xs text-slate-500 truncate">document.pdf</p>
+        </div>
+      </div>
+
+      <p class="text-xs sm:text-sm text-slate-600 leading-relaxed mb-4">
+        This PDF is encrypted. Enter the password to unlock it in <strong class="text-slate-800">100% Pure Vector Mode</strong> directly on your device.
+        <span class="block mt-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+          <strong class="text-slate-700">Hint:</strong> For e-Aadhaar: first 4 letters of name in <strong class="text-slate-700">CAPS</strong> + birth year, e.g. <code class="font-mono font-bold text-emerald-700">ANIS1990</code>.
+        </span>
+      </p>
+
+      <form id="passwordForm" class="space-y-3">
+        <div>
+          <label for="pdfPasswordInput" class="block text-xs font-semibold text-slate-700 mb-1.5">
+            PDF Password
+          </label>
+          <div class="relative">
+            <input
+              id="pdfPasswordInput"
+              type="password"
+              autocomplete="off"
+              placeholder="Enter PDF password"
+              class="w-full pl-3.5 pr-11 py-3 text-sm font-medium text-slate-900 bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600 transition"
+            />
+            <button
+              id="togglePwVisBtn"
+              type="button"
+              title="Show / Hide Password"
+              class="absolute right-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-lg flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition cursor-pointer"
+            >
+              <svg id="eyeOpenIcon" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+              <svg id="eyeClosedIcon" class="w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+              </svg>
+            </button>
+          </div>
+          <p id="pwErrorText" class="hidden mt-1.5 text-xs font-semibold text-red-600">
+            Incorrect password. Please try again.
+          </p>
+        </div>
+
+        <div class="flex items-center justify-end gap-2.5 pt-2">
+          <button
+            id="pwCancelBtn"
+            type="button"
+            class="px-4 py-2.5 text-xs sm:text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            id="pwSubmitBtn"
+            type="submit"
+            class="px-5 py-2.5 text-xs sm:text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] rounded-xl shadow-md shadow-emerald-600/20 transition cursor-pointer inline-flex items-center gap-2"
+          >
+            <span>Unlock &amp; Validate</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Notification (No alert/confirm) -->
+  <div
+    id="toastBox"
+    class="hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl shadow-xl text-sm font-medium text-white max-w-[92vw] text-center"
+  ></div>
+
+  <script>
+    // =========================================================================
+    // 1. CONFIGURATION & GLOBAL STATE
+    // =========================================================================
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    // Exact Adobe-style Green Checkmark SVG path (100x100 coordinate box)
+    const CHECKMARK_SVG_PATH = 'M 12 52 L 24 38 L 46 65 L 76 8 L 90 19 L 48 90 Z';
+
+    const state = {
+      fileName: 'document.pdf',
+      wasEncrypted: false,
+      engineMode: 'vector',       // 'vector' (100% Pure Vector Mode) | 'fallback' (emergency only)
+
+      // Pure-vector unencrypted PDF bytes in memory (used as source for all surgery & export)
+      unlockedVectorBytes: null,
+
+      // PDF.js documents for instant Before / After comparison
+      origPdfJs: null,            // Original unlocked PDF (with yellow '?')
+      cleanPdfJs: null,           // Surgically cleaned vector PDF (yellow '?' removed, "Signature valid" updated, no tick yet)
+
+      totalPages: 1,
+      viewPage: 1,
+      pageWidthPt: 595,
+      pageHeightPt: 842,
+
+      // Signature detection metadata
+      sigPage: 1,
+      sigFound: false,
+      sigBoxPt: { x: 340, y: 650, w: 190, h: 85 },
+      surgeryStats: { yellowRemoved: false, headerReplaced: false, sigCount: 0 },
+
+      // Independent Green Tick state (top-left PDF points)
+      tick: { cx: 435, cy: 692, size: 48 },
+      autoTickSnapshot: { cx: 435, cy: 692, size: 48 },
+      showTick: true,
+      tickLayer: 'behind',        // 'behind' (Adobe default) | 'top'
+      nudgeStep: 4,
+
+      // Manual Adjustment options
+      keepHeader: true,           // false = force-hide /n4 header layer
+      manualStampEnabled: false,
+      manualStampText: 'Signature valid\nDigitally Signed',
+      manualStampFontSize: 9,
+
+      // Preview viewport state
+      compareMode: 'validated',   // 'validated' | 'original'
+      zoomToSig: true,
+      zoomMultiplier: 1.0,
+      viewRectPt: { x: 0, y: 0, w: 595, h: 842 },
+
+      // Pending file while Password Modal is open
+      pendingBytes: null,
+      pendingFileName: ''
+    };
+
+    const el = {
+      fileInput: document.getElementById('pdfFileInput'),
+      uploadSection: document.getElementById('uploadSection'),
+      dropZone: document.getElementById('dropZone'),
+      selectFileBtn: document.getElementById('selectFileBtn'),
+      topUploadBtn: document.getElementById('topUploadBtn'),
+      loadingSection: document.getElementById('loadingSection'),
+      loadingTitle: document.getElementById('loadingTitle'),
+      loadingSub: document.getElementById('loadingSub'),
+      workspaceSection: document.getElementById('workspaceSection'),
+
+      headerModeBadge: document.getElementById('headerModeBadge'),
+      statusModeBadge: document.getElementById('statusModeBadge'),
+      statusText: document.getElementById('statusText'),
+      fileInfoText: document.getElementById('fileInfoText'),
+
+      modeValidatedBtn: document.getElementById('modeValidatedBtn'),
+      modeOriginalBtn: document.getElementById('modeOriginalBtn'),
+      zoomSigToggleBtn: document.getElementById('zoomSigToggleBtn'),
+      zoomOutBtn: document.getElementById('zoomOutBtn'),
+      zoomInBtn: document.getElementById('zoomInBtn'),
+      zoomLabel: document.getElementById('zoomLabel'),
+
+      canvasWrapper: document.getElementById('canvasWrapper'),
+      pdfCanvas: document.getElementById('pdfCanvas'),
+      manualStampOverlay: document.getElementById('manualStampOverlay'),
+      tickOverlay: document.getElementById('tickOverlay'),
+
+      showTickToggle: document.getElementById('showTickToggle'),
+      centerTickBtn: document.getElementById('centerTickBtn'),
+      tickCoordText: document.getElementById('tickCoordText'),
+      tickSizeVal: document.getElementById('tickSizeVal'),
+      tickSizeSlider: document.getElementById('tickSizeSlider'),
+      sizeMinusBtn: document.getElementById('sizeMinusBtn'),
+      sizePlusBtn: document.getElementById('sizePlusBtn'),
+      layerBehindBtn: document.getElementById('layerBehindBtn'),
+      layerTopBtn: document.getElementById('layerTopBtn'),
+
+      // Manual Adjustment Drawer
+      manualDrawerToggle: document.getElementById('manualDrawerToggle'),
+      manualDrawerChevron: document.getElementById('manualDrawerChevron'),
+      manualDrawerBody: document.getElementById('manualDrawerBody'),
+      prevPageBtn: document.getElementById('prevPageBtn'),
+      nextPageBtn: document.getElementById('nextPageBtn'),
+      pageLabel: document.getElementById('pageLabel'),
+      keepHeaderToggle: document.getElementById('keepHeaderToggle'),
+      manualStampToggle: document.getElementById('manualStampToggle'),
+      manualStampFields: document.getElementById('manualStampFields'),
+      manualStampText: document.getElementById('manualStampText'),
+      manualStampFontSize: document.getElementById('manualStampFontSize'),
+      manualStampFontVal: document.getElementById('manualStampFontVal'),
+
+      mainDownloadBtn: document.getElementById('mainDownloadBtn'),
+
+      // Password Modal
+      passwordModal: document.getElementById('passwordModal'),
+      pwFileName: document.getElementById('pwFileName'),
+      passwordForm: document.getElementById('passwordForm'),
+      pdfPasswordInput: document.getElementById('pdfPasswordInput'),
+      togglePwVisBtn: document.getElementById('togglePwVisBtn'),
+      eyeOpenIcon: document.getElementById('eyeOpenIcon'),
+      eyeClosedIcon: document.getElementById('eyeClosedIcon'),
+      pwErrorText: document.getElementById('pwErrorText'),
+      pwCancelBtn: document.getElementById('pwCancelBtn'),
+      pwSubmitBtn: document.getElementById('pwSubmitBtn'),
+
+      toastBox: document.getElementById('toastBox')
+    };
+
+    // =========================================================================
+    // 2. TOAST NOTIFICATION HELPER
+    // =========================================================================
+    let toastTimer = null;
+    function showToast(msg, type = 'info') {
+      clearTimeout(toastTimer);
+      const bg = {
+        success: 'bg-emerald-700',
+        error: 'bg-red-600',
+        info: 'bg-slate-800'
+      }[type] || 'bg-slate-800';
+      el.toastBox.className = `fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl shadow-xl text-sm font-medium text-white max-w-[92vw] text-center toast-animate ${bg}`;
+      el.toastBox.textContent = msg;
+      el.toastBox.classList.remove('hidden');
+      toastTimer = setTimeout(() => el.toastBox.classList.add('hidden'), 3600);
+    }
+
+    // =========================================================================
+    // 3. UPLOAD, DRAG-AND-DROP & PASSWORD-PROTECTED PDF FLOW
+    // =========================================================================
+    el.selectFileBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      el.fileInput.click();
+    });
+    el.dropZone.addEventListener('click', () => el.fileInput.click());
+    el.topUploadBtn.addEventListener('click', () => el.fileInput.click());
+
+    el.dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      el.dropZone.classList.add('bg-emerald-50/70', 'border-emerald-600');
+    });
+    el.dropZone.addEventListener('dragleave', () => {
+      el.dropZone.classList.remove('bg-emerald-50/70', 'border-emerald-600');
+    });
+    el.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.dropZone.classList.remove('bg-emerald-50/70', 'border-emerald-600');
+      const file = e.dataTransfer.files?.[0];
+      if (file) handlePdfUpload(file);
+    });
+    el.fileInput.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (file) handlePdfUpload(file);
+      el.fileInput.value = '';
+    });
+
+    el.togglePwVisBtn.addEventListener('click', () => {
+      const isHidden = el.pdfPasswordInput.type === 'password';
+      el.pdfPasswordInput.type = isHidden ? 'text' : 'password';
+      el.eyeOpenIcon.classList.toggle('hidden', isHidden);
+      el.eyeClosedIcon.classList.toggle('hidden', !isHidden);
+    });
+
+    function openPasswordModal(fileName, showError = false) {
+      el.pwFileName.textContent = fileName;
+      el.pwErrorText.classList.toggle('hidden', !showError);
+      el.passwordModal.classList.remove('hidden');
+      el.pdfPasswordInput.focus();
+      if (showError) el.pdfPasswordInput.select();
+    }
+
+    function closePasswordModal() {
+      el.passwordModal.classList.add('hidden');
+      el.pwErrorText.classList.add('hidden');
+      el.pdfPasswordInput.value = '';
+      el.pdfPasswordInput.type = 'password';
+      el.eyeOpenIcon.classList.remove('hidden');
+      el.eyeClosedIcon.classList.add('hidden');
+    }
+
+    el.pwCancelBtn.addEventListener('click', () => {
+      closePasswordModal();
+      state.pendingBytes = null;
+      state.pendingFileName = '';
+      el.loadingSection.classList.add('hidden');
+      if (!state.unlockedVectorBytes) {
+        el.uploadSection.classList.remove('hidden');
+      } else {
+        el.workspaceSection.classList.remove('hidden');
+      }
+    });
+
+    function isPasswordError(err) {
+      if (!err) return false;
+      if (err.name === 'PasswordException') return true;
+      const msg = String(err.message || err).toLowerCase();
+      return msg.includes('password') || msg.includes('encrypted') || msg.includes('decrypt');
+    }
+
+    async function handlePdfUpload(file) {
+      if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+        showToast('Please select a valid PDF file.', 'error');
+        return;
+      }
+
+      el.uploadSection.classList.add('hidden');
+      el.workspaceSection.classList.add('hidden');
+      el.loadingTitle.textContent = 'Opening PDF...';
+      el.loadingSub.textContent = 'Checking encryption & scanning digital signatures';
+      el.loadingSection.classList.remove('hidden');
+
+      try {
+        const buffer = await file.arrayBuffer();
+        const rawBytes = new Uint8Array(buffer);
+
+        // Try opening without a password first using pdf.js & @cantoo/pdf-lib
+        try {
+          const testPdfJs = await pdfjsLib.getDocument({ data: rawBytes.slice(0) }).promise;
+          await testPdfJs.destroy();
+          await unlockAndInitialize(rawBytes, file.name, '', false);
+        } catch (err) {
+          if (isPasswordError(err)) {
+            state.pendingBytes = rawBytes;
+            state.pendingFileName = file.name;
+            el.loadingSection.classList.add('hidden');
+            openPasswordModal(file.name, false);
+            return;
+          }
+          throw err;
+        }
+      } catch (err) {
+        console.error('Upload error:', err);
+        el.loadingSection.classList.add('hidden');
+        if (!state.unlockedVectorBytes) {
+          el.uploadSection.classList.remove('hidden');
+        } else {
+          el.workspaceSection.classList.remove('hidden');
+        }
+        showToast('Could not open this PDF. It may be corrupted or unsupported.', 'error');
+      }
+    }
+
+    el.passwordForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!state.pendingBytes) return;
+
+      const enteredPw = el.pdfPasswordInput.value;
+      if (!enteredPw) {
+        el.pwErrorText.textContent = 'Please enter the PDF password.';
+        el.pwErrorText.classList.remove('hidden');
+        el.pdfPasswordInput.focus();
+        return;
+      }
+
+      el.pwSubmitBtn.disabled = true;
+      el.pwSubmitBtn.textContent = 'Unlocking...';
+
+      try {
+        // 1. Validate password with pdf.js first (instant feedback for wrong password)
+        const testPdfJs = await pdfjsLib.getDocument({
+          data: state.pendingBytes.slice(0),
+          password: enteredPw
+        }).promise;
+        await testPdfJs.destroy();
+
+        // 2. Password is valid! Close modal and unlock in 100% Pure Vector Mode via @cantoo/pdf-lib
+        closePasswordModal();
+        await unlockAndInitialize(state.pendingBytes, state.pendingFileName, enteredPw, true);
+      } catch (err) {
+        if (isPasswordError(err)) {
+          el.pwErrorText.textContent = 'Incorrect password. Please try again.';
+          el.pwErrorText.classList.remove('hidden');
+          el.pdfPasswordInput.focus();
+          el.pdfPasswordInput.select();
+        } else {
+          console.error('Password unlock error:', err);
+          closePasswordModal();
+          el.loadingSection.classList.add('hidden');
+          el.uploadSection.classList.remove('hidden');
+          showToast('Unable to unlock this PDF.', 'error');
+        }
+      } finally {
+        el.pwSubmitBtn.disabled = false;
+        el.pwSubmitBtn.textContent = 'Unlock & Validate';
+      }
+    });
+
+    // =========================================================================
+    // 4. PURE-VECTOR PDF LAYER SURGERY ENGINE (@cantoo/pdf-lib + pako)
+    // =========================================================================
+    function bytesToLatin1(bytes) {
+      let out = '';
+      const chunk = 8192;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return out;
+    }
+
+    function latin1ToBytes(str) {
+      const arr = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) {
+        arr[i] = str.charCodeAt(i) & 0xff;
+      }
+      return arr;
+    }
+
+    function inflateFlateBytes(rawBytes) {
+      if (!rawBytes || rawBytes.length === 0) return rawBytes;
+      if (typeof pako !== 'undefined') {
+        try {
+          return pako.inflate(rawBytes);
+        } catch (_) {
+          try {
+            return pako.inflateRaw(rawBytes);
+          } catch (_) {}
+        }
+      }
+      return rawBytes;
+    }
+
+    function streamHasText(streamStr) {
+      return /\bBT\b/.test(streamStr) || /\b(?:Tj|TJ)\b/.test(streamStr);
+    }
+
+    /**
+     * Detects yellow color operators in PDF content streams:
+     * RGB: r > 0.7 && g > 0.65 && b < 0.45 (rg / RG / sc / SC / scn / SCN)
+     * CMYK: c < 0.25 && m < 0.25 && y > 0.5 (k / K)
+     */
+    function streamContainsYellow(streamStr) {
+      const rgbRegex = /(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(?:rg|RG|sc|SC|scn|SCN)(?=\s|$|\/)/g;
+      let m;
+      while ((m = rgbRegex.exec(streamStr)) !== null) {
+        const r = parseFloat(m[1]);
+        const g = parseFloat(m[2]);
+        const b = parseFloat(m[3]);
+        if (r > 0.7 && g > 0.65 && b < 0.45) return true;
+      }
+
+      const cmykRegex = /(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(?:k|K)(?=\s|$|\/)/g;
+      while ((m = cmykRegex.exec(streamStr)) !== null) {
+        const c = parseFloat(m[1]);
+        const mag = parseFloat(m[2]);
+        const y = parseFloat(m[3]);
+        if (c < 0.25 && mag < 0.25 && y > 0.5) return true;
+      }
+
+      return false;
+    }
+
+    function decodePdfHexString(hex) {
+      const clean = hex.replace(/\s+/g, '');
+      if (clean.length < 4) return { text: '', isUtf16: false };
+      // Check UTF-16BE BOM (FEFF) or 2-byte zero-padded ASCII (0053 0069 ...)
+      const isUtf16 = /^feff/i.test(clean) || (clean.length % 4 === 0 && /^00[2-7][0-9a-f]/i.test(clean));
+      let text = '';
+      if (isUtf16) {
+        const start = /^feff/i.test(clean) ? 4 : 0;
+        for (let i = start; i + 3 < clean.length; i += 4) {
+          text += String.fromCharCode(parseInt(clean.slice(i, i + 4), 16));
+        }
+      } else {
+        for (let i = 0; i + 1 < clean.length; i += 2) {
+          text += String.fromCharCode(parseInt(clean.slice(i, i + 2), 16));
+        }
+      }
+      return { text, isUtf16 };
+    }
+
+    function encodePdfHexString(str, isUtf16, hadBom) {
+      let hex = hadBom ? 'FEFF' : '';
+      for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        hex += isUtf16
+          ? code.toString(16).toUpperCase().padStart(4, '0')
+          : (code & 0xff).toString(16).toUpperCase().padStart(2, '0');
+      }
+      return `<${hex}>`;
+    }
+
+    /**
+     * Replaces ONLY "Signature Not Verified" with "Signature valid" in-place,
+     * preserving exact original font, size, and coordinates.
+     * Supports literal strings (...), hex strings <...>, and split TJ arrays [(...) ... (...) ] TJ.
+     */
+    function replaceSignatureNotVerifiedInStream(streamStr) {
+      let modified = streamStr;
+      let replaced = false;
+
+      // 1. Direct literal string: (Signature Not Verified)
+      const directLiteralRe = /\(\s*Signature\s+Not\s+Verified\s*\)/gi;
+      if (directLiteralRe.test(modified)) {
+        modified = modified.replace(directLiteralRe, '(Signature valid)');
+        replaced = true;
+      }
+
+      // 2. Hex string: <...>
+      modified = modified.replace(/<([0-9a-fA-F\s]{16,})>/g, (fullMatch, hexInner) => {
+        const { text, isUtf16 } = decodePdfHexString(hexInner);
+        if (/Signature\s+Not\s+Verified/i.test(text)) {
+          replaced = true;
+          const nextText = text.replace(/Signature\s+Not\s+Verified/i, 'Signature valid');
+          const hadBom = /^feff/i.test(hexInner.replace(/\s+/g, ''));
+          return encodePdfHexString(nextText, isUtf16, hadBom);
+        }
+        return fullMatch;
+      });
+
+      // 3. Split TJ arrays: [(Signa) -10 (ture) 250 (Not) 250 (Verified)] TJ
+      const tjArrayRe = /\[((?:[^[\]]|\\\[|\\\])*)\]\s*TJ/g;
+      modified = modified.replace(tjArrayRe, (fullMatch, inner) => {
+        const tokenRe = /\(((?:[^()\\]|\\.)*)\)|<([0-9a-fA-F\s]+)>/g;
+        let tm;
+        let combined = '';
+        let anyHex = false;
+        let anyUtf16 = false;
+        let hadBom = false;
+
+        while ((tm = tokenRe.exec(inner)) !== null) {
+          if (tm[1] !== undefined) {
+            combined += tm[1].replace(/\\([()\\])/g, '$1');
+          } else if (tm[2] !== undefined) {
+            anyHex = true;
+            const dec = decodePdfHexString(tm[2]);
+            if (dec.isUtf16) anyUtf16 = true;
+            if (/^feff/i.test(tm[2].replace(/\s+/g, ''))) hadBom = true;
+            combined += dec.text;
+          }
+        }
+
+        if (/Signature\s+Not\s+Verified/i.test(combined)) {
+          replaced = true;
+          const nextText = combined.replace(/Signature\s+Not\s+Verified/i, 'Signature valid');
+          if (anyHex && anyUtf16) {
+            return `[${encodePdfHexString(nextText, true, hadBom)}] TJ`;
+          }
+          const escaped = nextText.replace(/([()\\])/g, '\\$1');
+          return `[(${escaped})] TJ`;
+        }
+        return fullMatch;
+      });
+
+      return { text: modified, replaced };
+    }
+
+    /**
+     * Strips ONLY non-text yellow '?' paths and their immediately adjacent non-text
+     * black Bezier shadow paths from inline streams (e.g., WB e-Ration Card),
+     * while leaving ALL BT ... ET text blocks 100% untouched.
+     */
+    function stripInlineYellowPaths(streamStr) {
+      const segments = [];
+      const btRegex = /\bBT\b[\s\S]*?\bET\b/g;
+      let lastIdx = 0;
+      let match;
+
+      while ((match = btRegex.exec(streamStr)) !== null) {
+        if (match.index > lastIdx) {
+          segments.push({ isText: false, content: streamStr.slice(lastIdx, match.index) });
+        }
+        segments.push({ isText: true, content: match[0] });
+        lastIdx = match.index + match[0].length;
+      }
+      if (lastIdx < streamStr.length) {
+        segments.push({ isText: false, content: streamStr.slice(lastIdx) });
+      }
+
+      let removedAny = false;
+      for (const seg of segments) {
+        if (seg.isText || !streamContainsYellow(seg.content)) continue;
+
+        // Split into paint-terminated graphics units
+        const units = seg.content.split(/(?<=\s(?:f\*|B\*|b\*|f|F|B|b|S|s))(?=\s|$)/);
+        const isYellowUnit = units.map((u) => streamContainsYellow(u));
+        const isBlackShadowUnit = units.map((u) => {
+          const hasBezierOrRect = /\s(?:c|v|y|re)\b/.test(u);
+          const hasBlackPaint = /\b(?:0\s+0\s+0\s+(?:rg|RG)|0\s+(?:g|G)|0\s+0\s+0\s+1\s+(?:k|K))\b/.test(u);
+          return hasBezierOrRect && hasBlackPaint;
+        });
+
+        const removeFlags = new Array(units.length).fill(false);
+        for (let i = 0; i < units.length; i++) {
+          if (isYellowUnit[i]) {
+            removeFlags[i] = true;
+            removedAny = true;
+            if (i > 0 && isBlackShadowUnit[i - 1]) removeFlags[i - 1] = true;
+            if (i + 1 < units.length && isBlackShadowUnit[i + 1]) removeFlags[i + 1] = true;
+          }
+        }
+
+        const rebuilt = units.map((u, idx) => {
+          if (!removeFlags[idx]) return u;
+          // Preserve balanced q / Q graphics stack operators
+          const qOpens = (u.match(/(?:^|\s)q(?=\s|$)/g) || []).length;
+          const qCloses = (u.match(/(?:^|\s)Q(?=\s|$)/g) || []).length;
+          let balance = '';
+          for (let k = 0; k < qOpens; k++) balance += ' q ';
+          for (let k = 0; k < qCloses; k++) balance += ' Q ';
+          return balance;
+        });
+
+        seg.content = rebuilt.join('');
+      }
+
+      return {
+        text: segments.map((s) => s.content).join(''),
+        removed: removedAny
+      };
+    }
+
+    function isSignatureAnnotation(pdfDoc, annotDict) {
+      if (!annotDict || typeof annotDict.lookup !== 'function') return false;
+      const ft = annotDict.lookup(PDFLib.PDFName.of('FT'));
+      if (ft && ft.toString() === '/Sig') return true;
+
+      const parent = annotDict.lookup(PDFLib.PDFName.of('Parent'));
+      if (parent && typeof parent.lookup === 'function') {
+        const parentFt = parent.lookup(PDFLib.PDFName.of('FT'));
+        if (parentFt && parentFt.toString() === '/Sig') return true;
+      }
+
+      const vDict = annotDict.lookup(PDFLib.PDFName.of('V'));
+      if (vDict && typeof vDict.lookup === 'function') {
+        const vType = vDict.lookup(PDFLib.PDFName.of('Type'));
+        const vSubFilter = vDict.lookup(PDFLib.PDFName.of('SubFilter'));
+        if ((vType && vType.toString() === '/Sig') || vSubFilter) return true;
+      }
+
+      return false;
+    }
+
+    function writeCleanedStream(pdfDoc, streamRef, streamObj, newBytes) {
+      const newDict = streamObj.dict.clone(pdfDoc.context);
+      newDict.delete(PDFLib.PDFName.of('Filter'));
+      newDict.delete(PDFLib.PDFName.of('DecodeParms'));
+      newDict.set(PDFLib.PDFName.of('Length'), PDFLib.PDFNumber.of(newBytes.length));
+      const newStream = PDFLib.PDFRawStream.of(newDict, newBytes);
+      if (streamRef instanceof PDFLib.PDFRef) {
+        pdfDoc.context.assign(streamRef, newStream);
+        return streamRef;
+      }
+      return pdfDoc.context.register(newStream);
+    }
+
+    /**
+     * Recursively traverses /AP -> /N and all nested XObjects (/FRM, /n0, /n1, /n2, /n3, /n4):
+     * - Empties /n1 (validity icon layer) or non-text yellow leaf XObjects (removes yellow '?' + shadow)
+     * - Replaces "Signature Not Verified" with "Signature valid" in /n4 or any text stream
+     * - Optionally empties /n4 if user turned off Keep Header in Manual Adjustment
+     * - Preserves 100% of /n2 (signer name, date, GMT+05:30, reason, location) untouched!
+     */
+    function cleanAppearanceXObject(
+      pdfDoc,
+      xObjRef,
+      xObjKeyName = '',
+      visited = new Set(),
+      stats = { yellowRemoved: false, headerReplaced: false },
+      keepHeader = true
+    ) {
+      if (!xObjRef) return stats;
+      const refId = xObjRef.toString();
+      if (visited.has(refId)) return stats;
+      visited.add(refId);
+
+      let obj;
+      try {
+        obj = pdfDoc.context.lookup(xObjRef);
+      } catch (_) {
+        return stats;
+      }
+      if (!obj || typeof obj.getContents !== 'function' || !obj.dict) return stats;
+
+      let rawBytes = obj.getContents();
+      const filterObj = obj.dict.lookup(PDFLib.PDFName.of('Filter'));
+      if (filterObj && filterObj.toString().includes('FlateDecode')) {
+        rawBytes = inflateFlateBytes(rawBytes);
+      }
+
+      const streamStr = bytesToLatin1(rawBytes);
+      const hasText = streamHasText(streamStr);
+      const hasYellow = streamContainsYellow(streamStr);
+
+      const normalizedName = xObjKeyName.replace(/^\//, '').toLowerCase();
+      const resources = obj.dict.lookup(PDFLib.PDFName.of('Resources'));
+      const childXObjs = resources && typeof resources.lookup === 'function'
+        ? resources.lookup(PDFLib.PDFName.of('XObject'))
+        : null;
+      const hasChildXObjs = Boolean(
+        childXObjs && typeof childXObjs.entries === 'function' && Array.from(childXObjs.entries()).length > 0
+      );
+
+      // 1. Standard /n1 validity icon layer (Adobe / iText / UIDAI e-Aadhaar / WB e-District)
+      if (normalizedName === 'n1' && !hasText && !hasChildXObjs) {
+        writeCleanedStream(pdfDoc, xObjRef, obj, new Uint8Array(0));
+        stats.yellowRemoved = true;
+        return stats;
+      }
+
+      // 2. Non-text leaf XObject painting yellow '?'
+      if (!hasText && hasYellow && !hasChildXObjs) {
+        writeCleanedStream(pdfDoc, xObjRef, obj, new Uint8Array(0));
+        stats.yellowRemoved = true;
+        return stats;
+      }
+
+      // 3. Optional user override: force-hide /n4 header layer
+      if (!keepHeader && normalizedName === 'n4' && !hasChildXObjs) {
+        writeCleanedStream(pdfDoc, xObjRef, obj, new Uint8Array(0));
+        return stats;
+      }
+
+      // 4. Recurse into nested child XObjects (/FRM -> /n0, /n1, /n2, /n3, /n4)
+      if (hasChildXObjs) {
+        for (const [key, childRef] of childXObjs.entries()) {
+          cleanAppearanceXObject(pdfDoc, childRef, key.toString(), visited, stats, keepHeader);
+        }
+      }
+
+      // 5. Inline surgery on current stream (if it contains inline yellow '?' or "Signature Not Verified")
+      let updatedStr = streamStr;
+      let streamModified = false;
+
+      if (hasYellow) {
+        const stripped = stripInlineYellowPaths(updatedStr);
+        if (stripped.removed) {
+          updatedStr = stripped.text;
+          streamModified = true;
+          stats.yellowRemoved = true;
+        }
+      }
+
+      if (hasText) {
+        if (!keepHeader && /Signature\s+Not\s+Verified/i.test(updatedStr)) {
+          // Blank out header text if user explicitly unchecked Keep Header
+          updatedStr = updatedStr.replace(/\(\s*Signature\s+Not\s+Verified\s*\)/gi, '()');
+          streamModified = true;
+        } else {
+          const rep = replaceSignatureNotVerifiedInStream(updatedStr);
+          if (rep.replaced) {
+            updatedStr = rep.text;
+            streamModified = true;
+            stats.headerReplaced = true;
+          }
+        }
+      }
+
+      if (streamModified) {
+        writeCleanedStream(pdfDoc, xObjRef, obj, latin1ToBytes(updatedStr));
+      }
+
+      return stats;
+    }
+
+    /**
+     * Computes exact affine transform mapping Form XObject /BBox (and /Matrix) onto /Rect.
+     */
+    function computeXObjectFlattenTransform(pdfDoc, nStreamObj, rect) {
+      const [rx1, ry1, rx2, ry2] = rect;
+      const rx = Math.min(rx1, rx2);
+      const ry = Math.min(ry1, ry2);
+      const rw = Math.abs(rx2 - rx1);
+      const rh = Math.abs(ry2 - ry1);
+
+      let bbox = [0, 0, rw, rh];
+      const bboxObj = nStreamObj?.dict?.lookup(PDFLib.PDFName.of('BBox'));
+      if (bboxObj && typeof bboxObj.size === 'function' && bboxObj.size() === 4) {
+        bbox = [0, 1, 2, 3].map((i) => {
+          const n = pdfDoc.context.lookup(bboxObj.get(i));
+          return typeof n?.asNumber === 'function' ? n.asNumber() : 0;
+        });
+      }
+
+      let mat = [1, 0, 0, 1, 0, 0];
+      const matObj = nStreamObj?.dict?.lookup(PDFLib.PDFName.of('Matrix'));
+      if (matObj && typeof matObj.size === 'function' && matObj.size() === 6) {
+        mat = [0, 1, 2, 3, 4, 5].map((i) => {
+          const n = pdfDoc.context.lookup(matObj.get(i));
+          return typeof n?.asNumber === 'function' ? n.asNumber() : (i === 0 || i === 3 ? 1 : 0);
+        });
+      }
+
+      const corners = [
+        [bbox[0], bbox[1]],
+        [bbox[2], bbox[1]],
+        [bbox[0], bbox[3]],
+        [bbox[2], bbox[3]]
+      ].map(([x, y]) => [
+        mat[0] * x + mat[2] * y + mat[4],
+        mat[1] * x + mat[3] * y + mat[5]
+      ]);
+
+      const tbMinX = Math.min(...corners.map((c) => c[0]));
+      const tbMaxX = Math.max(...corners.map((c) => c[0]));
+      const tbMinY = Math.min(...corners.map((c) => c[1]));
+      const tbMaxY = Math.max(...corners.map((c) => c[1]));
+      const tbW = tbMaxX - tbMinX;
+      const tbH = tbMaxY - tbMinY;
+
+      const scaleX = tbW > 0.001 ? rw / tbW : 1;
+      const scaleY = tbH > 0.001 ? rh / tbH : 1;
+      const tx = rx - tbMinX * scaleX;
+      const ty = ry - tbMinY * scaleY;
+
+      return { scaleX, scaleY, tx, ty };
+    }
+
+    function attachXObjectToPage(pdfDoc, page, xObjName, xObjRef) {
+      page.node.normalize();
+      let resources = page.node.Resources();
+      if (!resources) {
+        resources = pdfDoc.context.obj({});
+        page.node.set(PDFLib.PDFName.of('Resources'), resources);
+      }
+      let xObjects = resources.lookup(PDFLib.PDFName.of('XObject'));
+      if (!xObjects || typeof xObjects.set !== 'function') {
+        xObjects = pdfDoc.context.obj({});
+        resources.set(PDFLib.PDFName.of('XObject'), xObjects);
+      }
+      xObjects.set(PDFLib.PDFName.of(xObjName), xObjRef);
+    }
+
+    function removeSigFromAcroForm(pdfDoc, removedRefsSet) {
+      try {
+        const acroForm = pdfDoc.catalog.lookup(PDFLib.PDFName.of('AcroForm'));
+        if (!acroForm || typeof acroForm.lookup !== 'function') return;
+        const fields = acroForm.lookup(PDFLib.PDFName.of('Fields'));
+        if (!fields || typeof fields.size !== 'function') return;
+        for (let i = fields.size() - 1; i >= 0; i--) {
+          const fRef = fields.get(i);
+          if (removedRefsSet.has(fRef.toString())) {
+            fields.remove(i);
+          } else {
+            const fDict = pdfDoc.context.lookup(fRef);
+            if (isSignatureAnnotation(pdfDoc, fDict)) {
+              fields.remove(i);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    /**
+     * Draws the crisp vector Adobe-style Green Checkmark (#009933 fill, black stroke & drop shadow)
+     * directly onto the PDF page at exact (cx, cy, size) coordinates.
+     */
+    function drawVectorGreenTickOnPage(page, pageWidthPt, pageHeightPt) {
+      if (!state.showTick) return;
+
+      const cropBox = page.getCropBox() || page.getMediaBox();
+      const cxOffset = cropBox.x || 0;
+      const cyOffset = cropBox.y || 0;
+      const pW = cropBox.width;
+      const pH = cropBox.height;
+
+      const ratioX = pW / pageWidthPt;
+      const ratioY = pH / pageHeightPt;
+      const curSize = state.tick.size;
+
+      const tickW = curSize * ratioX;
+      const tickLeftPt = (state.tick.cx - curSize / 2) * ratioX;
+      const tickTopPt = (state.tick.cy - curSize / 2) * ratioY;
+
+      const pdfLeft = cxOffset + tickLeftPt;
+      const pdfTopFromBottom = cyOffset + pH - tickTopPt;
+
+      const svgScale = tickW / 100;
+      const shadowOffset = Math.max(0.65, 3.2 * svgScale);
+
+      // Black drop shadow
+      page.drawSvgPath(CHECKMARK_SVG_PATH, {
+        x: pdfLeft + shadowOffset,
+        y: pdfTopFromBottom - shadowOffset,
+        scale: svgScale,
+        color: PDFLib.rgb(0, 0, 0)
+      });
+
+      // Adobe-style green fill (#009933) + crisp black outline
+      page.drawSvgPath(CHECKMARK_SVG_PATH, {
+        x: pdfLeft,
+        y: pdfTopFromBottom,
+        scale: svgScale,
+        color: PDFLib.rgb(0, 0.6, 0.2),
+        borderColor: PDFLib.rgb(0, 0, 0),
+        borderWidth: Math.max(0.6, 2.8 * svgScale)
+      });
+    }
+
+    /**
+     * Runs 100% Pure-Vector PDF Layer Surgery on `state.unlockedVectorBytes`.
+     * - When `drawTick = false`: produces the surgically cleaned vector PDF for live preview.
+     * - When `drawTick = true`: flattens cleaned /AP + vector Green Checkmark in exact layer order.
+     */
+    async function buildPureVectorPdf({ drawTick = false } = {}) {
+      const pdfDoc = await PDFLib.PDFDocument.load(state.unlockedVectorBytes.slice(0));
+      const pages = pdfDoc.getPages();
+      const removedRefs = new Set();
+
+      let primarySigInfo = null;
+      const flattenedSigsByPage = new Map();
+      const stats = { yellowRemoved: false, headerReplaced: false, sigCount: 0 };
+
+      for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+        const page = pages[pIdx];
+        const annots = page.node.Annots();
+        if (!annots || typeof annots.size !== 'function') continue;
+
+        const pageFlattens = [];
+        for (let i = annots.size() - 1; i >= 0; i--) {
+          const annotRef = annots.get(i);
+          const annotDict = pdfDoc.context.lookup(annotRef);
+          if (!isSignatureAnnotation(pdfDoc, annotDict)) continue;
+
+          stats.sigCount++;
+
+          const rectObj = annotDict.lookup(PDFLib.PDFName.of('Rect'));
+          let rect = null;
+          if (rectObj && typeof rectObj.size === 'function' && rectObj.size() === 4) {
+            rect = [0, 1, 2, 3].map((k) => {
+              const n = pdfDoc.context.lookup(rectObj.get(k));
+              return typeof n?.asNumber === 'function' ? n.asNumber() : 0;
+            });
+          }
+
+          const apDict = annotDict.lookup(PDFLib.PDFName.of('AP'));
+          const nRef = apDict && typeof apDict.get === 'function'
+            ? apDict.get(PDFLib.PDFName.of('N'))
+            : null;
+
+          if (rect && Math.abs(rect[2] - rect[0]) > 6 && Math.abs(rect[3] - rect[1]) > 6 && nRef) {
+            cleanAppearanceXObject(pdfDoc, nRef, 'N', new Set(), stats, state.keepHeader);
+
+            const nObj = pdfDoc.context.lookup(nRef);
+            const transform = computeXObjectFlattenTransform(pdfDoc, nObj, rect);
+            const xObjName = `SigClean_${pIdx}_${i}`;
+            attachXObjectToPage(pdfDoc, page, xObjName, nRef);
+            pageFlattens.push({ xObjName, transform });
+
+            if (!primarySigInfo) {
+              primarySigInfo = { pageIndex: pIdx, rect };
+            }
+          }
+
+          // Remove /Sig widget annotation so viewers never re-render the old '?' or broken icon
+          annots.remove(i);
+          removedRefs.add(annotRef.toString());
+        }
+
+        if (pageFlattens.length > 0) {
+          flattenedSigsByPage.set(pIdx, pageFlattens);
+        }
+      }
+
+      if (removedRefs.size > 0) {
+        removeSigFromAcroForm(pdfDoc, removedRefs);
+      }
+
+      const drawFlattenedSigs = (page, pIdx) => {
+        const list = flattenedSigsByPage.get(pIdx);
+        if (!list) return;
+        for (const item of list) {
+          const { scaleX, scaleY, tx, ty } = item.transform;
+          page.pushOperators(
+            PDFLib.pushGraphicsState(),
+            PDFLib.concatTransformationMatrix(scaleX, 0, 0, scaleY, tx, ty),
+            PDFLib.drawObject(PDFLib.PDFName.of(item.xObjName)),
+            PDFLib.popGraphicsState()
+          );
+        }
+      };
+
+      const drawOptionalManualStamp = async (page) => {
+        if (!state.manualStampEnabled || !state.manualStampText.trim()) return;
+        const helvetica = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+        const cropBox = page.getCropBox() || page.getMediaBox();
+        const cxOffset = cropBox.x || 0;
+        const cyOffset = cropBox.y || 0;
+        const pW = cropBox.width;
+        const pH = cropBox.height;
+        const ratioX = pW / state.pageWidthPt;
+        const ratioY = pH / state.pageHeightPt;
+
+        const lines = state.manualStampText.replace(/\r\n/g, '\n').split('\n');
+        const fontSize = state.manualStampFontSize * ratioY;
+        const startX = cxOffset + (state.tick.cx - state.tick.size * 1.1) * ratioX;
+        let curY = cyOffset + pH - (state.tick.cy - state.tick.size * 0.45) * ratioY;
+
+        for (const line of lines) {
+          page.drawText(line, {
+            x: Math.max(cxOffset + 8, startX),
+            y: curY,
+            size: fontSize,
+            font: helvetica,
+            color: PDFLib.rgb(0, 0, 0)
+          });
+          curY -= fontSize * 1.25;
+        }
+      };
+
+      for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+        const page = pages[pIdx];
+        const isTargetPage = pIdx === state.viewPage - 1;
+
+        if (drawTick && isTargetPage) {
+          if (state.tickLayer === 'behind') {
+            // Adobe Reader default: Vector Green Checkmark FIRST, cleaned /AP signature text ON TOP!
+            drawVectorGreenTickOnPage(page, state.pageWidthPt, state.pageHeightPt);
+            drawFlattenedSigs(page, pIdx);
+            await drawOptionalManualStamp(page);
+          } else {
+            // Optional: Cleaned /AP signature text FIRST, Vector Green Checkmark ON TOP!
+            drawFlattenedSigs(page, pIdx);
+            await drawOptionalManualStamp(page);
+            drawVectorGreenTickOnPage(page, state.pageWidthPt, state.pageHeightPt);
+          }
+        } else {
+          drawFlattenedSigs(page, pIdx);
+        }
+      }
+
+      const outBytes = await pdfDoc.save();
+      return { bytes: outBytes, primarySigInfo, stats };
+    }
+
+    // =========================================================================
+    // 5. UNLOCK & INITIALIZE WORKSPACE (100% PURE VECTOR PIPELINE)
+    // =========================================================================
+    async function unlockAndInitialize(rawBytes, fileName, password, wasEncrypted) {
+      el.loadingTitle.textContent = wasEncrypted
+        ? 'Unlocking in 100% Vector Mode...'
+        : 'Performing Vector Layer Surgery...';
+      el.loadingSub.textContent = 'Removing only yellow \'?\' while keeping every original font & line intact';
+      el.loadingSection.classList.remove('hidden');
+
+      state.fileName = fileName;
+      state.wasEncrypted = wasEncrypted;
+      state.keepHeader = true;
+      state.manualStampEnabled = false;
+      state.showTick = true;
+      state.tickLayer = 'behind';
+      state.compareMode = 'validated';
+      state.zoomMultiplier = 1.0;
+
+      // 1. Unlock with @cantoo/pdf-lib and immediately save an unencrypted pure-vector copy in memory
+      let decryptedVectorBytes = null;
+      try {
+        const loadOpts = password ? { password } : {};
+        const doc = await PDFLib.PDFDocument.load(rawBytes.slice(0), loadOpts);
+        decryptedVectorBytes = await doc.save();
+        state.engineMode = 'vector';
+        state.unlockedVectorBytes = decryptedVectorBytes;
+      } catch (cantooErr) {
+        console.error('@cantoo/pdf-lib could not decrypt this proprietary format:', cantooErr);
+        // Emergency fallback ONLY if @cantoo/pdf-lib genuinely cannot decrypt an unknown proprietary format
+        state.engineMode = 'fallback';
+        state.unlockedVectorBytes = rawBytes;
+      }
+
+      // 2. Load Original PDF.js document (for Before comparison & geometry)
+      if (state.origPdfJs) {
+        try { await state.origPdfJs.destroy(); } catch (_) {}
+      }
+      state.origPdfJs = await pdfjsLib.getDocument({
+        data: state.unlockedVectorBytes.slice(0),
+        password: state.engineMode === 'fallback' ? password : ''
+      }).promise;
+      state.totalPages = state.origPdfJs.numPages;
+
+      // 3. Run Pure-Vector Layer Surgery (without tick yet) for the live preview
+      if (state.cleanPdfJs) {
+        try { await state.cleanPdfJs.destroy(); } catch (_) {}
+        state.cleanPdfJs = null;
+      }
+
+      if (state.engineMode === 'vector') {
+        const surgery = await buildPureVectorPdf({ drawTick: false });
+        state.surgeryStats = surgery.stats;
+        state.cleanPdfJs = await pdfjsLib.getDocument({ data: surgery.bytes.slice(0) }).promise;
+
+        if (surgery.primarySigInfo) {
+          state.sigFound = true;
+          state.sigPage = surgery.primarySigInfo.pageIndex + 1;
+          const jsPage = await state.cleanPdfJs.getPage(state.sigPage);
+          const vp = jsPage.getViewport({ scale: 1 });
+          state.pageWidthPt = vp.width;
+          state.pageHeightPt = vp.height;
+
+          const vr = vp.convertToViewportRectangle(surgery.primarySigInfo.rect);
+          state.sigBoxPt = {
+            x: Math.min(vr[0], vr[2]),
+            y: Math.min(vr[1], vr[3]),
+            w: Math.abs(vr[2] - vr[0]),
+            h: Math.abs(vr[3] - vr[1])
+          };
+        } else {
+          // No /Sig widget annotation (e.g. scanned PDF)
+          state.sigFound = false;
+          state.sigPage = 1;
+          const jsPage = await state.cleanPdfJs.getPage(1);
+          const vp = jsPage.getViewport({ scale: 1 });
+          state.pageWidthPt = vp.width;
+          state.pageHeightPt = vp.height;
+          state.sigBoxPt = {
+            x: Math.round(vp.width * 0.54),
+            y: Math.round(vp.height * 0.74),
+            w: Math.round(vp.width * 0.34),
+            h: 82
+          };
+        }
+      } else {
+        // Emergency fallback path
+        const jsPage = await state.origPdfJs.getPage(1);
+        const vp = jsPage.getViewport({ scale: 1 });
+        state.sigFound = false;
+        state.sigPage = 1;
+        state.pageWidthPt = vp.width;
+        state.pageHeightPt = vp.height;
+        state.sigBoxPt = {
+          x: Math.round(vp.width * 0.54),
+          y: Math.round(vp.height * 0.74),
+          w: Math.round(vp.width * 0.34),
+          h: 82
+        };
+      }
+
+      // 4. Auto-position Green Tick centered cleanly over the signature box
+      const autoSize = Math.round(Math.max(18, Math.min(100, state.sigBoxPt.h * 0.78)));
+      state.tick = {
+        cx: Math.round(state.sigBoxPt.x + state.sigBoxPt.w * 0.54),
+        cy: Math.round(state.sigBoxPt.y + state.sigBoxPt.h * 0.54),
+        size: autoSize
+      };
+      state.autoTickSnapshot = { ...state.tick };
+      state.viewPage = state.sigPage;
+      state.zoomToSig = state.sigFound;
+
+      updateBadgesAndStatus();
+      syncControlsUI();
+
+      el.loadingSection.classList.add('hidden');
+      el.workspaceSection.classList.remove('hidden');
+
+      await renderPreviewCanvas();
+
+      showToast(
+        state.sigFound
+          ? (state.wasEncrypted
+              ? `Unlocked & validated in 100% Vector Mode (Page ${state.sigPage})!`
+              : `Signature validated in 100% Vector Mode (Page ${state.sigPage})!`)
+          : 'No digital /Sig annotation detected — drag the green tick to place it.',
+        state.sigFound ? 'success' : 'info'
+      );
+    }
+
+    async function rebuildCleanPreviewAfterHeaderToggle() {
+      if (state.engineMode !== 'vector' || !state.unlockedVectorBytes) return;
+      try {
+        const surgery = await buildPureVectorPdf({ drawTick: false });
+        if (state.cleanPdfJs) {
+          try { await state.cleanPdfJs.destroy(); } catch (_) {}
+        }
+        state.cleanPdfJs = await pdfjsLib.getDocument({ data: surgery.bytes.slice(0) }).promise;
+        await renderPreviewCanvas();
+      } catch (err) {
+        console.error('Header toggle rebuild error:', err);
+      }
+    }
+
+    function updateBadgesAndStatus() {
+      const badgeLabel = state.engineMode === 'vector'
+        ? (state.wasEncrypted ? '100% Vector Mode • Unlocked' : '100% Vector Mode')
+        : 'Fallback Mode';
+
+      el.headerModeBadge.textContent = badgeLabel;
+      el.statusModeBadge.textContent = badgeLabel;
+      el.statusModeBadge.className = state.engineMode === 'vector'
+        ? 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800'
+        : 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800';
+
+      el.fileInfoText.textContent = `${state.fileName} • ${state.totalPages} ${state.totalPages === 1 ? 'page' : 'pages'}`;
+
+      if (state.sigFound) {
+        el.statusText.textContent = state.wasEncrypted
+          ? `Signature validated on Page ${state.sigPage} • Exports unlocked 100% vector PDF`
+          : `Signature validated on Page ${state.sigPage} • Original text, fonts & watermarks intact`;
+      } else {
+        el.statusText.textContent = 'No /Sig field detected • Drag green tick to place manually';
+      }
+    }
+
+    // =========================================================================
+    // 6. HIGH-DPR CANVAS PREVIEW & 60 FPS GREEN TICK OVERLAY
+    // =========================================================================
+    function computeViewRectPt() {
+      if (!state.zoomToSig || state.viewPage !== state.sigPage) {
+        const w = state.pageWidthPt / state.zoomMultiplier;
+        const h = state.pageHeightPt / state.zoomMultiplier;
+        const cx = state.pageWidthPt / 2;
+        const cy = state.pageHeightPt / 2;
+        return {
+          x: Math.max(0, cx - w / 2),
+          y: Math.max(0, cy - h / 2),
+          w: Math.min(state.pageWidthPt, w),
+          h: Math.min(state.pageHeightPt, h)
+        };
+      }
+
+      // 3x Zoom to Signature box
+      const b = state.sigBoxPt;
+      const padX = Math.max(32, b.w * 0.32);
+      const padY = Math.max(26, b.h * 0.42);
+      let targetW = (b.w + padX * 2) / state.zoomMultiplier;
+      let targetH = (b.h + padY * 2) / state.zoomMultiplier;
+      targetW = Math.min(state.pageWidthPt, Math.max(85, targetW));
+      targetH = Math.min(state.pageHeightPt, Math.max(55, targetH));
+
+      const sigCx = b.x + b.w / 2;
+      const sigCy = b.y + b.h / 2;
+      let vx = sigCx - targetW / 2;
+      let vy = sigCy - targetH / 2;
+      vx = Math.max(0, Math.min(state.pageWidthPt - targetW, vx));
+      vy = Math.max(0, Math.min(state.pageHeightPt - targetH, vy));
+
+      return { x: vx, y: vy, w: targetW, h: targetH };
+    }
+
+    async function renderPreviewCanvas() {
+      if (!state.origPdfJs) return;
+
+      const pdfDocToRender = (state.compareMode === 'validated' && state.cleanPdfJs)
+        ? state.cleanPdfJs
+        : state.origPdfJs;
+
+      const page = await pdfDocToRender.getPage(state.viewPage);
+      const vp1 = page.getViewport({ scale: 1 });
+      state.pageWidthPt = vp1.width;
+      state.pageHeightPt = vp1.height;
+
+      const vr = computeViewRectPt();
+      state.viewRectPt = vr;
+
+      const maxCssWidth = Math.min(860, (el.canvasWrapper.parentElement?.clientWidth || 720) - 20);
+      const dpr = Math.min(3, Math.max(2, window.devicePixelRatio || 2));
+      const renderScale = (maxCssWidth / vr.w) * dpr;
+
+      const canvasW = Math.max(120, Math.round(vr.w * renderScale));
+      const canvasH = Math.max(80, Math.round(vr.h * renderScale));
+
+      el.pdfCanvas.width = canvasW;
+      el.pdfCanvas.height = canvasH;
+      el.pdfCanvas.style.width = `${Math.round(canvasW / dpr)}px`;
+      el.pdfCanvas.style.height = 'auto';
+
+      const ctx = el.pdfCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasW, canvasH);
+
+      const vp = page.getViewport({
+        scale: renderScale,
+        offsetX: -vr.x * renderScale,
+        offsetY: -vr.y * renderScale
+      });
+
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      el.zoomLabel.textContent = `${Math.round(state.zoomMultiplier * 100)}%`;
+      el.pageLabel.textContent = `${state.viewPage} / ${state.totalPages}`;
+      el.prevPageBtn.disabled = state.viewPage <= 1;
+      el.nextPageBtn.disabled = state.viewPage >= state.totalPages;
+
+      updateTickOverlayPosition();
+    }
+
+    function updateTickOverlayPosition() {
+      const vr = state.viewRectPt;
+      const shouldShow = state.compareMode === 'validated' && state.showTick;
+
+      if (!shouldShow) {
+        el.tickOverlay.style.display = 'none';
+      } else {
+        const curSize = state.tick.size;
+        const leftPt = state.tick.cx - curSize / 2;
+        const topPt = state.tick.cy - curSize / 2;
+
+        el.tickOverlay.style.display = 'block';
+        el.tickOverlay.style.left = `${((leftPt - vr.x) / vr.w) * 100}%`;
+        el.tickOverlay.style.top = `${((topPt - vr.y) / vr.h) * 100}%`;
+        el.tickOverlay.style.width = `${(curSize / vr.w) * 100}%`;
+        el.tickOverlay.style.height = `${(curSize / vr.h) * 100}%`;
+
+        el.tickOverlay.classList.toggle('layer-behind', state.tickLayer === 'behind');
+        el.tickOverlay.classList.toggle('layer-top', state.tickLayer === 'top');
+      }
+
+      // Optional manual stamp preview
+      if (state.compareMode === 'validated' && state.manualStampEnabled && state.manualStampText.trim()) {
+        const canvasDisplayW = el.pdfCanvas.getBoundingClientRect().width || 300;
+        const pxPerPt = canvasDisplayW / vr.w;
+        const leftPt = Math.max(8, state.tick.cx - state.tick.size * 1.1);
+        const topPt = Math.max(8, state.tick.cy - state.tick.size * 0.45);
+        el.manualStampOverlay.style.display = 'block';
+        el.manualStampOverlay.style.left = `${((leftPt - vr.x) / vr.w) * 100}%`;
+        el.manualStampOverlay.style.top = `${((topPt - vr.y) / vr.h) * 100}%`;
+        el.manualStampOverlay.style.fontSize = `${Math.max(7, state.manualStampFontSize * pxPerPt)}px`;
+        el.manualStampOverlay.textContent = state.manualStampText;
+      } else {
+        el.manualStampOverlay.style.display = 'none';
+      }
+
+      el.tickCoordText.textContent = `X: ${Math.round(state.tick.cx)}, Y: ${Math.round(state.tick.cy)}`;
+    }
+
+    function clampTickToPage() {
+      const half = state.tick.size / 2;
+      state.tick.cx = Math.max(half, Math.min(state.pageWidthPt - half, state.tick.cx));
+      state.tick.cy = Math.max(half, Math.min(state.pageHeightPt - half, state.tick.cy));
+    }
+
+    // =========================================================================
+    // 7. DIRECT TOUCH & MOUSE DRAGGING (MOVES ONLY THE GREEN TICK AT 60 FPS)
+    // =========================================================================
+    let isDraggingTick = false;
+    let dragStartPtr = { x: 0, y: 0 };
+    let dragStartTick = { cx: 0, cy: 0 };
+
+    el.tickOverlay.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      isDraggingTick = true;
+      dragStartPtr = { x: e.clientX, y: e.clientY };
+      dragStartTick = { cx: state.tick.cx, cy: state.tick.cy };
+      el.tickOverlay.classList.add('dragging');
+      el.tickOverlay.setPointerCapture(e.pointerId);
+    });
+
+    el.tickOverlay.addEventListener('pointermove', (e) => {
+      if (!isDraggingTick) return;
+      e.preventDefault();
+      const rect = el.canvasWrapper.getBoundingClientRect();
+      const dxPt = ((e.clientX - dragStartPtr.x) / (rect.width || 1)) * state.viewRectPt.w;
+      const dyPt = ((e.clientY - dragStartPtr.y) / (rect.height || 1)) * state.viewRectPt.h;
+
+      state.tick.cx = dragStartTick.cx + dxPt;
+      state.tick.cy = dragStartTick.cy + dyPt;
+      clampTickToPage();
+      updateTickOverlayPosition();
+    });
+
+    const endDrag = (e) => {
+      if (!isDraggingTick) return;
+      isDraggingTick = false;
+      el.tickOverlay.classList.remove('dragging');
+      try {
+        el.tickOverlay.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    };
+    el.tickOverlay.addEventListener('pointerup', endDrag);
+    el.tickOverlay.addEventListener('pointercancel', endDrag);
+
+    // =========================================================================
+    // 8. UI CONTROLS & MANUAL ADJUSTMENT DRAWER EVENTS
+    // =========================================================================
+    function syncControlsUI() {
+      const isVal = state.compareMode === 'validated';
+      el.modeValidatedBtn.className = isVal
+        ? 'px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-emerald-700 shadow-xs transition cursor-pointer'
+        : 'px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition cursor-pointer';
+      el.modeOriginalBtn.className = !isVal
+        ? 'px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-slate-900 shadow-xs transition cursor-pointer'
+        : 'px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition cursor-pointer';
+
+      el.zoomSigToggleBtn.className = state.zoomToSig
+        ? 'px-3 py-1.5 text-xs font-semibold rounded-xl border border-emerald-600 bg-emerald-50 text-emerald-800 transition cursor-pointer inline-flex items-center gap-1.5'
+        : 'px-3 py-1.5 text-xs font-semibold rounded-xl border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition cursor-pointer inline-flex items-center gap-1.5';
+
+      el.showTickToggle.checked = state.showTick;
+      el.tickSizeSlider.value = state.tick.size;
+      el.tickSizeVal.textContent = `${Math.round(state.tick.size)}pt`;
+
+      const isBehind = state.tickLayer === 'behind';
+      el.layerBehindBtn.className = isBehind
+        ? 'py-2.5 px-3 text-xs font-semibold rounded-xl border border-emerald-600 bg-emerald-50 text-emerald-800 transition cursor-pointer'
+        : 'py-2.5 px-3 text-xs font-semibold rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer';
+      el.layerTopBtn.className = !isBehind
+        ? 'py-2.5 px-3 text-xs font-semibold rounded-xl border border-emerald-600 bg-emerald-50 text-emerald-800 transition cursor-pointer'
+        : 'py-2.5 px-3 text-xs font-semibold rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 transition cursor-pointer';
+
+      el.keepHeaderToggle.checked = state.keepHeader;
+      el.manualStampToggle.checked = state.manualStampEnabled;
+      el.manualStampFields.classList.toggle('hidden', !state.manualStampEnabled);
+      el.manualStampFontSize.value = state.manualStampFontSize;
+      el.manualStampFontVal.textContent = `${state.manualStampFontSize}pt`;
+    }
+
+    el.modeValidatedBtn.addEventListener('click', () => {
+      state.compareMode = 'validated';
+      syncControlsUI();
+      renderPreviewCanvas();
+    });
+    el.modeOriginalBtn.addEventListener('click', () => {
+      state.compareMode = 'original';
+      syncControlsUI();
+      renderPreviewCanvas();
+    });
+
+    el.zoomSigToggleBtn.addEventListener('click', () => {
+      state.zoomToSig = !state.zoomToSig;
+      state.zoomMultiplier = 1.0;
+      if (state.zoomToSig) state.viewPage = state.sigPage;
+      syncControlsUI();
+      renderPreviewCanvas();
+    });
+
+    el.zoomInBtn.addEventListener('click', () => {
+      state.zoomMultiplier = Math.min(2.5, +(state.zoomMultiplier + 0.25).toFixed(2));
+      renderPreviewCanvas();
+    });
+    el.zoomOutBtn.addEventListener('click', () => {
+      state.zoomMultiplier = Math.max(0.5, +(state.zoomMultiplier - 0.25).toFixed(2));
+      renderPreviewCanvas();
+    });
+
+    el.showTickToggle.addEventListener('change', () => {
+      state.showTick = el.showTickToggle.checked;
+      updateTickOverlayPosition();
+    });
+
+    // D-Pad Movement
+    document.querySelectorAll('.dpad-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const dir = btn.dataset.dir;
+        const step = state.nudgeStep;
+        if (dir === 'up') state.tick.cy -= step;
+        if (dir === 'down') state.tick.cy += step;
+        if (dir === 'left') state.tick.cx -= step;
+        if (dir === 'right') state.tick.cx += step;
+        clampTickToPage();
+        updateTickOverlayPosition();
+      });
+    });
+
+    // Step Size Selector
+    document.querySelectorAll('.step-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.nudgeStep = parseFloat(btn.dataset.step);
+        document.querySelectorAll('.step-btn').forEach((b) => {
+          const active = b === btn;
+          b.className = active
+            ? 'step-btn py-1.5 text-xs font-semibold rounded-lg border border-emerald-600 bg-emerald-600 text-white cursor-pointer'
+            : 'step-btn py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 cursor-pointer';
+        });
+      });
+    });
+
+    // Center Reset Button
+    el.centerTickBtn.addEventListener('click', () => {
+      state.tick = { ...state.autoTickSnapshot };
+      syncControlsUI();
+      updateTickOverlayPosition();
+      showToast('Green tick centered on signature.', 'info');
+    });
+
+    // Tick Size Slider (12pt - 120pt)
+    const setTickSize = (val) => {
+      state.tick.size = Math.max(12, Math.min(120, Math.round(val)));
+      clampTickToPage();
+      el.tickSizeSlider.value = state.tick.size;
+      el.tickSizeVal.textContent = `${state.tick.size}pt`;
+      updateTickOverlayPosition();
+    };
+    el.tickSizeSlider.addEventListener('input', () => setTickSize(parseFloat(el.tickSizeSlider.value)));
+    el.sizeMinusBtn.addEventListener('click', () => setTickSize(state.tick.size - 4));
+    el.sizePlusBtn.addEventListener('click', () => setTickSize(state.tick.size + 4));
+
+    // Layer Order Toggle
+    el.layerBehindBtn.addEventListener('click', () => {
+      state.tickLayer = 'behind';
+      syncControlsUI();
+      updateTickOverlayPosition();
+    });
+    el.layerTopBtn.addEventListener('click', () => {
+      state.tickLayer = 'top';
+      syncControlsUI();
+      updateTickOverlayPosition();
+    });
+
+    // Manual Adjustment Drawer Toggle (collapsed by default)
+    el.manualDrawerToggle.addEventListener('click', () => {
+      const isHidden = el.manualDrawerBody.classList.toggle('hidden');
+      el.manualDrawerToggle.setAttribute('aria-expanded', String(!isHidden));
+      el.manualDrawerChevron.classList.toggle('rotate-180', !isHidden);
+    });
+
+    el.prevPageBtn.addEventListener('click', () => {
+      if (state.viewPage > 1) {
+        state.viewPage--;
+        renderPreviewCanvas();
+      }
+    });
+    el.nextPageBtn.addEventListener('click', () => {
+      if (state.viewPage < state.totalPages) {
+        state.viewPage++;
+        renderPreviewCanvas();
+      }
+    });
+
+    el.keepHeaderToggle.addEventListener('change', async () => {
+      state.keepHeader = el.keepHeaderToggle.checked;
+      await rebuildCleanPreviewAfterHeaderToggle();
+    });
+
+    el.manualStampToggle.addEventListener('change', () => {
+      state.manualStampEnabled = el.manualStampToggle.checked;
+      syncControlsUI();
+      updateTickOverlayPosition();
+    });
+    el.manualStampText.addEventListener('input', () => {
+      state.manualStampText = el.manualStampText.value;
+      updateTickOverlayPosition();
+    });
+    el.manualStampFontSize.addEventListener('input', () => {
+      state.manualStampFontSize = parseInt(el.manualStampFontSize.value, 10);
+      el.manualStampFontVal.textContent = `${state.manualStampFontSize}pt`;
+      updateTickOverlayPosition();
+    });
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      if (!state.unlockedVectorBytes) return;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => renderPreviewCanvas(), 180);
+    });
+
+    // =========================================================================
+    // 9. PURE-VECTOR EXPORT & DOWNLOAD
+    // =========================================================================
+    async function exportFallbackPdf() {
+      // Emergency-only fallback if a proprietary encryption format could not be decrypted by @cantoo/pdf-lib
+      const newPdf = await PDFLib.PDFDocument.create();
+      for (let p = 1; p <= state.totalPages; p++) {
+        const jsPage = await state.origPdfJs.getPage(p);
+        const vp1 = jsPage.getViewport({ scale: 1 });
+        const scale = Math.min(300 / 72, 3600 / Math.max(vp1.width, vp1.height));
+        const vp = jsPage.getViewport({ scale });
+
+        const c = document.createElement('canvas');
+        c.width = Math.round(vp.width);
+        c.height = Math.round(vp.height);
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        await jsPage.render({ canvasContext: ctx, viewport: vp }).promise;
+
+        const pngBytes = await new Promise((resolve, reject) => {
+          c.toBlob(async (blob) => {
+            if (!blob) return reject(new Error('Export failed'));
+            resolve(new Uint8Array(await blob.arrayBuffer()));
+          }, 'image/png');
+        });
+        const img = await newPdf.embedPng(pngBytes);
+        const page = newPdf.addPage([vp1.width, vp1.height]);
+        page.drawImage(img, { x: 0, y: 0, width: vp1.width, height: vp1.height });
+        if (p === state.viewPage) {
+          drawVectorGreenTickOnPage(page, vp1.width, vp1.height);
+        }
+      }
+      return await newPdf.save();
+    }
+
+    el.mainDownloadBtn.addEventListener('click', async () => {
+      if (!state.unlockedVectorBytes) return;
+
+      const prevHtml = el.mainDownloadBtn.innerHTML;
+      el.mainDownloadBtn.disabled = true;
+      el.mainDownloadBtn.innerHTML = `
+        <svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <span>Generating Pure Vector PDF...</span>
+      `;
+
+      try {
+        let outBytes;
+        if (state.engineMode === 'vector') {
+          const res = await buildPureVectorPdf({ drawTick: true });
+          outBytes = res.bytes;
+        } else {
+          outBytes = await exportFallbackPdf();
+        }
+
+        const blob = new Blob([outBytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        const cleanName = state.fileName.replace(/\.pdf$/i, '');
+        a.download = `validated_${cleanName}.pdf`;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        setTimeout(() => URL.revokeObjectURL(url), 8000);
+        showToast(
+          state.wasEncrypted
+            ? 'Unlocked 100% vector PDF downloaded successfully!'
+            : 'Validated 100% vector PDF downloaded successfully!',
+          'success'
+        );
+      } catch (err) {
+        console.error('Export error:', err);
+        showToast('Failed to export PDF. Please try again.', 'error');
+      } finally {
+        el.mainDownloadBtn.disabled = false;
+        el.mainDownloadBtn.innerHTML = prevHtml;
+      }
+    });
+  </script>
+</body>
+</html>
